@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "hac_api.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "/hac_api.py" }
+  ]
+}
