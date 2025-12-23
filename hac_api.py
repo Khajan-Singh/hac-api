@@ -2,262 +2,256 @@ from flask import Flask, request, jsonify
 import requests
 from lxml import html
 from bs4 import BeautifulSoup
+import pandas as pd
+import re
 import math
-import time
-import uuid
-import threading
 
 app = Flask(__name__)
 
-# ---------- Config ----------
-TOKEN_TTL_SECONDS = 30 * 60  # 30 minutes
-CLEANUP_INTERVAL_SECONDS = 60
+green = ["#18FD73", "#ABFFB1"]
+blue = ["#43B9FD", "#93D7FF"]
+yellow = ["#FFCA63", "#FAF392"]
+red = ["#F48A8A", "#F6ADAD"]
 
-# token -> {account, expires_at}
-_TOKEN_STORE = {}
-_TOKEN_LOCK = threading.Lock()
-
-
-# ---------- Exceptions ----------
+# Invalid Credentials Error
 class Invalid_Credentials(Exception):
     def __init__(self):
         super().__init__("Set the username and password to valid values!")
 
-
-# ---------- HAC Account ----------
 class Account:
     def __init__(self, username, password):
         self.username = username
         self.password = password
         self.session_requests = requests.session()
 
-        login_url = "https://hac.friscoisd.org/HomeAccess/Account/LogOn?ReturnUrl=%2fHomeAccess%2f"
+        login_url = 'https://hac.friscoisd.org/HomeAccess/Account/LogOn?ReturnUrl=%2fHomeAccess%2f'
         result = self.session_requests.get(login_url)
         tree = html.fromstring(result.text)
-        authenticity_token = list(
-            set(tree.xpath("//input[@name='__RequestVerificationToken']/@value"))
-        )[0]
+        authenticity_token = list(set(tree.xpath("//input[@name='__RequestVerificationToken']/@value")))[0]
 
-        payload = {
+        self.login_payload = {
             "VerificationOption": "UsernamePassword",
             "Database": "10",
             "LogOnDetails.Password": password,
             "__RequestVerificationToken": authenticity_token,
-            "LogOnDetails.UserName": username,
+            "LogOnDetails.UserName": username
         }
+        login_result = self.session_requests.post(login_url, data=self.login_payload, headers=dict(referer=login_url))
+        
+        # Checking if the credentials are correct for seeing if the login button is in the output
+        parser = BeautifulSoup(login_result.text, 'html.parser')
+        element = parser.find('div', class_='sg-login-sign-in')
 
-        login_result = self.session_requests.post(
-            login_url, data=payload, headers={"referer": login_url}
-        )
-
-        parser = BeautifulSoup(login_result.text, "html.parser")
-        if parser.find("div", class_="sg-login-sign-in"):
+        # Check if the element exists
+        if element:
+            self.username = None
+            self.password = None
+            self.session_requests = None
+            result = None
+            login_result = None
             raise Invalid_Credentials
 
+    def reset(self):
+        self.__init__(self.username, self.password)
+
+    # Function to initialize classes
+    def _initialize_classes(self, grades_html, names_html):
+        class1 = 0
+        try:
+            class1 = str(grades_html[0])
+        except:
+            pass
+        return class1
+    
     def return_student_gpas(self):
-        url = "https://hac.friscoisd.org/HomeAccess/Content/Student/Transcript.aspx"
-        r = self.session_requests.get(url, headers={"referer": url})
-        soup = BeautifulSoup(r.content, "html.parser")
+        urls = "https://hac.friscoisd.org/HomeAccess/Content/Student/Transcript.aspx"
+        result = self.session_requests.get(urls, headers=dict(referer=urls))
 
-        weighted = soup.find("span", id="plnMain_rpTranscriptGroup_lblGPACum1")
-        unweighted = soup.find("span", id="plnMain_rpTranscriptGroup_lblGPACum2")
-        rank_el = soup.find("span", id="plnMain_rpTranscriptGroup_lblGPARank1")
+        parser = BeautifulSoup(result.content, 'html.parser')
 
-        weighted = weighted.text if weighted else "N/A"
-        unweighted = unweighted.text if unweighted else "N/A"
-        rank = rank_el.text if rank_el else "N/A"
-        percentile = "N/A"
+        weighted_gpa_element = parser.find('span', id='plnMain_rpTranscriptGroup_lblGPACum1')
+        unweighted_gpa_element = parser.find('span', id='plnMain_rpTranscriptGroup_lblGPACum2')
+        class_rank_element = parser.find('span', id='plnMain_rpTranscriptGroup_lblGPARank1')
 
-        if rank != "N/A":
-            r, _, size = rank.split(" ")
-            percentile = math.ceil((int(r) / int(size)) * 10000) / 100
+        weighted_gpa = weighted_gpa_element.text if weighted_gpa_element else "N/A"
+        unweighted_gpa = unweighted_gpa_element.text if unweighted_gpa_element else "N/A"
+        class_rank = class_rank_element.text if class_rank_element else "N/A"
+        class_percentile = "N/A"
+        
+        student_rank = None
 
-        return [weighted, unweighted, rank, str(percentile)]
+        if class_rank != "N/A":
+            split = class_rank.split(" ")
+            student_rank = int(split[0])
+            class_size = int(split[2])
 
+            class_percentile = (student_rank / class_size) * 100
+            class_percentile = math.ceil(class_percentile * 100) / 100
+            class_percentile = str(class_percentile)
+
+        return [weighted_gpa, unweighted_gpa, class_rank, class_percentile]
+    
     def return_student_info(self):
-        url = "https://hac.friscoisd.org/HomeAccess/Content/Student/Registration.aspx"
-        r = self.session_requests.get(url, headers={"referer": url})
-        soup = BeautifulSoup(r.content, "html.parser")
+        urls = "https://hac.friscoisd.org/HomeAccess/Content/Student/Registration.aspx"
+        result = self.session_requests.get(urls, headers=dict(referer=urls))
 
-        def grab(id):
-            el = soup.find("span", id=id)
-            return el.text if el else "N/A"
+        parser = BeautifulSoup(result.content, 'html.parser')
 
-        student_name = grab("plnMain_lblRegStudentName")
-        parts = student_name.split(" ")
-        first = parts[1] if len(parts) > 1 else "N/A"
-        last = parts[0].rstrip(",")
+        student_id_element = parser.find('span', id='plnMain_lblRegStudentID')
+        student_name_element = parser.find('span', id='plnMain_lblRegStudentName')
+        birth_date_element = parser.find('span', id='plnMain_lblBirthDate')
+        counselor_element = parser.find('span', id='plnMain_lblCounselor')
+        building_element = parser.find('span', id='plnMain_lblBuildingName')
+        calendar_element = parser.find('span', id='plnMain_lblCalendar')
+        grade_element = parser.find('span', id='plnMain_lblGrade')
+        language_element = parser.find('span', id='plnMain_lblLanguage')
 
-        full_name = " ".join(parts[1:]) + " " + last
+        student_id = student_id_element.text if student_id_element else "N/A"
+        student_name = student_name_element.text if student_name_element else "N/A"
+        birth_date = birth_date_element.text if birth_date_element else "N/A"
+        counselor = counselor_element.text if counselor_element else "N/A"
+        building = building_element.text if building_element else "N/A"
+        calendar = calendar_element.text if calendar_element else "N/A"
+        grade = grade_element.text if grade_element else "N/A"
+        language = language_element.text if language_element else "N/A"
 
-        return [
-            grab("plnMain_lblRegStudentID"),
-            full_name.strip(),
-            first,
-            grab("plnMain_lblBirthDate"),
-            grab("plnMain_lblCounselor"),
-            grab("plnMain_lblBuildingName"),
-            grab("plnMain_lblCalendar"),
-            grab("plnMain_lblGrade"),
-            grab("plnMain_lblLanguage"),
-        ]
+        name_list = student_name.split(" ")
+        first_name = name_list[1]
+        last_name = name_list[0]
+        name_list.remove(last_name)
+        last_name = last_name[:-1]
+        student_name = ""
+        for entry in name_list:
+            student_name += entry
+            student_name += " "
+        student_name += last_name
+
+        return [student_id, student_name, first_name, birth_date, counselor, building, calendar, grade, language]
 
     def return_student_transcript(self):
-        url = "https://hac.friscoisd.org/HomeAccess/Content/Student/Transcript.aspx"
-        r = self.session_requests.get(url, headers={"referer": url})
-        soup = BeautifulSoup(r.content, "html.parser")
+        urls = "https://hac.friscoisd.org/HomeAccess/Content/Student/Transcript.aspx"
+        result = self.session_requests.get(urls, headers=dict(referer=urls))
 
-        groups = soup.find_all("td", class_="sg-transcript-group")
-        transcript = []
+        parser = BeautifulSoup(result.content, 'html.parser')
 
-        for i, group in enumerate(groups):
-            p = BeautifulSoup(str(group), "lxml")
-            tables = p.find_all("table")
+        transcriptGroup = parser.find_all("td", "sg-transcript-group")
 
-            header, courses_tbl, credits_tbl = tables[:3]
+        transcriptDetails = []
+        for index, transcript in enumerate(transcriptGroup):
+            parser = BeautifulSoup(f"<html><body>{transcript}</body></html>", "lxml")
+            innerTables = parser.find_all('table')
 
-            hp = BeautifulSoup(str(header), "lxml")
-            years = hp.find("span", id=f"plnMain_rpTranscriptGroup_lblYearValue_{i}")
-            grade = hp.find("span", id=f"plnMain_rpTranscriptGroup_lblGradeValue_{i}")
-            building = hp.find("span", id=f"plnMain_rpTranscriptGroup_lblBuildingValue_{i}")
+            headerTable = innerTables[0]
+            coursesTable = innerTables[1]
+            totalCreditsTable = innerTables[2]
 
-            cp = BeautifulSoup(str(courses_tbl), "lxml")
+            parser = BeautifulSoup(f"<html><body>{headerTable}</body></html>", "lxml")
+
+            yearsAttended = parser.find('span', id=f'plnMain_rpTranscriptGroup_lblYearValue_{index}')
+            gradeLevel = parser.find('span', id=f'plnMain_rpTranscriptGroup_lblGradeValue_{index}')
+            building = parser.find('span', id=f'plnMain_rpTranscriptGroup_lblBuildingValue_{index}')
+
+            yearsAttended = yearsAttended.text.strip() if yearsAttended else "N/A"
+            gradeLevel = gradeLevel.text.strip() if gradeLevel else "N/A"
+            building = building.text.strip() if building else "N/A"
+
+            # Extract course details
+            parser = BeautifulSoup(f"<html><body>{coursesTable}</body></html>", "lxml")
             courses = []
+            rows = parser.find_all('tr', class_='sg-asp-table-data-row')
+            for row in rows:
+                columns = row.find_all('td')
+                if len(columns) >= 6:
+                    course = {
+                        'courseCode': columns[0].text.strip() if columns[0] else "N/A",
+                        'courseName': columns[1].text.strip() if columns[1] else "N/A",
+                        'sem1Grade': columns[2].text.strip() if columns[2] else "N/A",
+                        'sem2Grade': columns[3].text.strip() if columns[3] else "N/A",
+                        'finalGrade': columns[4].text.strip() if columns[4] else "N/A",
+                        'courseCredits': columns[5].text.strip() if columns[5] else "N/A"
+                    }
+                    courses.append(course)
 
-            for row in cp.find_all("tr", class_="sg-asp-table-data-row"):
-                cols = row.find_all("td")
-                if len(cols) >= 6:
-                    courses.append({
-                        "courseCode": cols[0].text.strip(),
-                        "courseName": cols[1].text.strip(),
-                        "sem1Grade": cols[2].text.strip(),
-                        "sem2Grade": cols[3].text.strip(),
-                        "finalGrade": cols[4].text.strip(),
-                        "courseCredits": cols[5].text.strip(),
-                    })
+            parser = BeautifulSoup(f"<html><body>{totalCreditsTable}</body></html>", "lxml")
+            totalCredits_el = parser.find('label', id=f'plnMain_rpTranscriptGroup_LblTCreditValue_{index}')
+            totalCredits = totalCredits_el.text if totalCredits_el else "N/A"
 
-            tp = BeautifulSoup(str(credits_tbl), "lxml")
-            credits = tp.find("label", id=f"plnMain_rpTranscriptGroup_LblTCreditValue_{i}")
-
-            transcript.append({
-                "yearsAttended": years.text if years else "N/A",
-                "gradeLevel": grade.text if grade else "N/A",
-                "building": building.text if building else "N/A",
-                "totalCredits": credits.text if credits else "N/A",
-                "courses": courses,
+            transcriptDetails.append({
+                'yearsAttended': yearsAttended,
+                'gradeLevel': gradeLevel,
+                'building': building,
+                'totalCredits': totalCredits,
+                'courses': courses
             })
 
-        return transcript
+        return transcriptDetails
 
+    def get_username(self):
+        return self.username
 
-# ---------- Token helpers ----------
-def _get_token():
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth.split(" ", 1)[1]
-    return None
-
-
-def _get_account():
-    token = _get_token()
-    if not token:
-        return None, ("Missing Authorization header", 401)
-
-    with _TOKEN_LOCK:
-        entry = _TOKEN_STORE.get(token)
-        if not entry or entry["expires_at"] < time.time():
-            return None, ("Invalid or expired token", 401)
-        entry["expires_at"] = time.time() + TOKEN_TTL_SECONDS
-        return entry["account"], None
-
-
-def _cleanup_loop():
-    while True:
-        time.sleep(CLEANUP_INTERVAL_SECONDS)
-        with _TOKEN_LOCK:
-            now = time.time()
-            for t in list(_TOKEN_STORE):
-                if _TOKEN_STORE[t]["expires_at"] < now:
-                    del _TOKEN_STORE[t]
-
-
-threading.Thread(target=_cleanup_loop, daemon=True).start()
-
-
-# ---------- Routes ----------
-@app.route("/login", methods=["POST"])
+@app.route('/login', methods=['GET'])
 def login():
-    data = request.get_json() or {}
+    username = request.args.get('username')
+    password = request.args.get('password')
+
     try:
-        acc = Account(data.get("username"), data.get("password"))
-        token = uuid.uuid4().hex
-        with _TOKEN_LOCK:
-            _TOKEN_STORE[token] = {
-                "account": acc,
-                "expires_at": time.time() + TOKEN_TTL_SECONDS,
-            }
+        account = Account(username, password)
+        return jsonify({"message": "Login successful", "username": account.get_username()}), 200
+    except Invalid_Credentials:
+        return jsonify({"message": "Invalid credentials"}), 401
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {e}"}), 500
+
+@app.route('/student_gpas', methods=['GET'])
+def student_gpas():
+    username = request.args.get('username')
+    password = request.args.get('password')
+
+    try:
+        account = Account(username, password)
+        info = account.return_student_gpas()
+        return jsonify({"weightedGPA": info[0], "unweightedGPA": info[1], "rank": info[2], "percentile": info[3]}), 200
+    except Invalid_Credentials:
+        return jsonify({"message": "Invalid credentials"}), 401
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {e}"}), 500
+
+@app.route('/student_info', methods=['GET'])
+def student_info():
+    username = request.args.get('username')
+    password = request.args.get('password')
+
+    try:
+        account = Account(username, password)
+        info = account.return_student_info()
+        return jsonify({"id": info[0], "name": info[1], "firstName": info[2], "birthdate": info[3], "counselor": info[4], "campus": info[5], "calendar": info[6], "grade": info[7], "language": info[8]}), 200
+    except Invalid_Credentials:
+        return jsonify({"message": "Invalid credentials"}), 401
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {e}"}), 500
+
+@app.route('/transcript', methods=["GET"])
+def transcript():
+    username = request.args.get('username')
+    password = request.args.get('password')
+
+    try:
+        account = Account(username, password)
+        transcript_info = account.return_student_transcript()
+        gpa_info = account.return_student_gpas()
         return jsonify({
-            "message": "Login successful",
-            "username": data.get("username"),
-            "token": token,
-            "expiresIn": TOKEN_TTL_SECONDS,
+            "studentTranscript": transcript_info,
+            "studentGPAs": {
+                "weightedGPA": gpa_info[0],
+                "unweightedGPA": gpa_info[1],
+                "rank": gpa_info[2],
+                "percentile": gpa_info[3]
+            }
         })
     except Invalid_Credentials:
         return jsonify({"message": "Invalid credentials"}), 401
-
-
-@app.route("/student_gpas")
-def student_gpas():
-    acc, err = _get_account()
-    if err:
-        return jsonify({"message": err[0]}), err[1]
-    g = acc.return_student_gpas()
-    return jsonify({
-        "weightedGPA": g[0],
-        "unweightedGPA": g[1],
-        "rank": g[2],
-        "percentile": g[3],
-    })
-
-
-@app.route("/student_info")
-def student_info():
-    acc, err = _get_account()
-    if err:
-        return jsonify({"message": err[0]}), err[1]
-    i = acc.return_student_info()
-    return jsonify({
-        "id": i[0],
-        "name": i[1],
-        "firstName": i[2],
-        "birthdate": i[3],
-        "counselor": i[4],
-        "campus": i[5],
-        "calendar": i[6],
-        "grade": i[7],
-        "language": i[8],
-    })
-
-
-@app.route("/transcript")
-def transcript():
-    acc, err = _get_account()
-    if err:
-        return jsonify({"message": err[0]}), err[1]
-
-    t = acc.return_student_transcript()
-    g = acc.return_student_gpas()
-
-    return jsonify({
-        "studentTranscript": t,
-        "studentGPAs": {
-            "weightedGPA": g[0],
-            "unweightedGPA": g[1],
-            "rank": g[2],
-            "percentile": g[3],
-        },
-    })
-
+    except Exception as e:
+        return jsonify({"message": f"An error occurred: {e}"}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5002, debug=False)
+    app.run(host='0.0.0.0', port=5002, debug=True)
